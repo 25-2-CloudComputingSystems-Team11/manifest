@@ -1,0 +1,254 @@
+# ==========================================
+# 1. 데이터베이스 영역 (Namespace: news-db)
+# ==========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: news-db
+---
+# DB 비밀번호 (news-db)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secret
+  namespace: news-db
+type: Opaque
+stringData:
+  MYSQL_PASSWORD: "a12345678"
+---
+# 데이터 영구 저장소 요청 (PVC)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: news-db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# MySQL 배포
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: news-db
+spec:
+  selector:
+    matchLabels: {app: mysql}
+  template:
+    metadata:
+      labels: {app: mysql}
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "10m"
+        args: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: MYSQL_PASSWORD
+        - name: MYSQL_DATABASE
+          value: "news_db"
+        ports:
+          - containerPort: 3306
+        volumeMounts:
+          - name: mysql-storage
+            mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-storage
+        persistentVolumeClaim:
+          claimName: mysql-pvc
+---
+# MySQL 서비스
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: news-db
+spec:
+  selector: {app: mysql}
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+# Redis 배포
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: news-db
+spec:
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      containers:
+      - name: redis
+        image: redis:alpine
+        ports:
+          - containerPort: 6379
+---
+# Redis 서비스
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: news-db
+spec:
+  selector: {app: redis}
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+# ==========================================
+# 2. 애플리케이션 영역 (Namespace: news-app)
+# ==========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: news-app
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chatgpt-api-secret 
+  namespace: news-app
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "<OpenAI API Key>"
+---
+# App 설정 (DB 주소 지정)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: news-app
+data:
+  MYSQL_HOST: "mysql-service.news-db"
+  MYSQL_DB: "news_db"
+  REDIS_HOST: "redis-service.news-db"
+---
+# App 비밀번호 (news-app)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-db-secret
+  namespace: news-app
+type: Opaque
+stringData:
+  MYSQL_PASSWORD: "a12345678"
+---
+# 크롤러 CronJob (5분마다)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: news-crawler
+  namespace: news-app
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          imagePullSecrets:
+            - name: ghcr-secret
+          containers:
+          - name: crawler
+            image: ghcr.io/25-2-cloudcomputingsystems-team11/news-crawler:v1
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "10m"
+              limits:
+                memory: "256Mi"
+                cpu: "500m"
+            imagePullPolicy: Always
+            command: ["python", "crawler.py"]
+            env:
+            - name: MYSQL_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: MYSQL_HOST
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-db-secret
+                  key: MYSQL_PASSWORD
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: REDIS_HOST
+          restartPolicy: OnFailure
+---
+# API 서버 배포 (OPENAI_API_KEY 수정 완료)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: news-api
+  namespace: news-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: news-api}
+  template:
+    metadata:
+      labels: {app: news-api}
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+      - name: api
+        image: ghcr.io/25-2-cloudcomputingsystems-team11/news-crawler:v1
+        imagePullPolicy: Always
+        command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+        ports:
+          - containerPort: 8000
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "10m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        env:
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: REDIS_HOST
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: chatgpt-api-secret
+              key: OPENAI_API_KEY
+
+---
+# API 외부 접속 서비스 (NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: news-api-service
+  namespace: news-app
+spec:
+  type: NodePort
+  selector: {app: news-api}
+  ports:
+    - port: 80
+      targetPort: 8000
+      nodePort: 30080
