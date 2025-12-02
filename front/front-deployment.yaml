@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: front
-          image: ghcr.io/25-2-cloudcomputingsystems-team11/front:v4
+          image: ghcr.io/25-2-cloudcomputingsystems-team11/front:v8
           ports:
             - containerPort: 80
 
