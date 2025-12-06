@@ -14,7 +14,7 @@ metadata:
   namespace: news-db
 type: Opaque
 stringData:
-  MYSQL_PASSWORD: "a12345678"
+  MYSQL_PASSWORD: "<DB_PASSWORD>"
 ---
 # 데이터 영구 저장소 요청 (PVC)
 apiVersion: v1
@@ -148,7 +148,7 @@ metadata:
   namespace: news-app
 type: Opaque
 stringData:
-  MYSQL_PASSWORD: "a12345678"
+  MYSQL_PASSWORD: "<DB_PASSWORD>"
 ---
 # 크롤러 CronJob (5분마다)
 apiVersion: batch/v1
@@ -163,6 +163,9 @@ spec:
   jobTemplate:
     spec:
       template:
+        metadata:
+          labels:
+            app: crawler
         spec:
           imagePullSecrets:
             - name: ghcr-secret
@@ -196,16 +199,21 @@ spec:
                   key: REDIS_HOST
           restartPolicy: OnFailure
 ---
-# API 서버 배포 (OPENAI_API_KEY 수정 완료)
+# API 서버 배포
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: news-api
   namespace: news-app
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels: {app: news-api}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels: {app: news-api}
@@ -237,7 +245,6 @@ spec:
             secretKeyRef:
               name: chatgpt-api-secret
               key: OPENAI_API_KEY
-
 ---
 # API 외부 접속 서비스 (NodePort)
 apiVersion: v1
